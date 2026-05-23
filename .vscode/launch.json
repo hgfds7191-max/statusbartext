@@ -1,17 +1,230 @@
-// A launch configuration that launches the extension inside a new window
-// Use IntelliSense to learn about possible attributes.
-// Hover to view descriptions of existing attributes.
-// For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
-{
-	"version": "0.2.0",
-	"configurations": [
-		{
-			"name": "Run Extension",
-			"type": "extensionHost",
-			"request": "launch",
-			"args": [
-				"--extensionDevelopmentPath=${workspaceFolder}"
-			]
-		}
-	]
+// MainActivity.kt
+package com.example.stepcounter
+
+import android.content.Context
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.edit
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
+import java.text.SimpleDateFormat
+import java.util.*
+
+class MainActivity : ComponentActivity(), SensorEventListener {
+    private lateinit var sensorManager: SensorManager
+    private var stepSensor: Sensor? = null
+
+    private var baselineSteps = 0f
+    private var isBaselineSet = false
+    private lateinit var prefs: androidx.preference.PreferenceManager
+
+    private val gson = Gson()
+    private var todaySteps by mutableStateOf(0)
+    private var goal by mutableStateOf(10000)
+    private var history by mutableStateOf(mapOf<String, Int>())
+    private var savedDate by mutableStateOf(currentDateKey())
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        stepSensor = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
+
+        prefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(this)
+
+        loadState()
+        checkForDateRoll()
+
+        setContent {
+            StepCounterScreen(
+                todaySteps = todaySteps,
+                goal = goal,
+                history = history,
+                onGoalChange = { newGoal -> goal = newGoal; saveGoal(newGoal) },
+                onSaveGoal = { saveGoal(goal) }
+            )
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        stepSensor?.also { sensor ->
+            sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_UI)
+        }
+        checkForDateRoll()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        sensorManager.unregisterListener(this)
+    }
+
+    override fun onSensorChanged(event: SensorEvent?) {
+        if (event?.sensor?.type != Sensor.TYPE_STEP_COUNTER) return
+
+        if (!isBaselineSet) {
+            baselineSteps = event.values[0]
+            isBaselineSet = true
+        }
+
+        val count = (event.values[0] - baselineSteps).toInt()
+        todaySteps = if (count < 0) 0 else count
+        saveTodaySteps()
+        if (todaySteps >= goal) {
+            // In a real app send a notification.
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+
+    private fun currentDateKey(): String {
+        val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+        return fmt.format(Date())
+    }
+
+    private fun loadState() {
+        goal = prefs.getInt("stepGoal", 10000)
+        todaySteps = prefs.getInt("todaySteps", 0)
+        savedDate = prefs.getString("savedDate", currentDateKey()) ?: currentDateKey()
+        history = prefs.getString("stepHistory", null)?.let {
+            val type = object : TypeToken<Map<String, Int>>() {}.type
+            gson.fromJson(it, type)
+        } ?: emptyMap()
+    }
+
+    private fun saveGoal(value: Int) {
+        prefs.edit {
+            putInt("stepGoal", value)
+        }
+    }
+
+    private fun saveTodaySteps() {
+        prefs.edit {
+            putInt("todaySteps", todaySteps)
+        }
+    }
+
+    private fun saveHistory() {
+        prefs.edit {
+            putString("stepHistory", gson.toJson(history))
+        }
+    }
+
+    private fun saveDate(date: String) {
+        prefs.edit {
+            putString("savedDate", date)
+        }
+    }
+
+    private fun checkForDateRoll() {
+        val todayKey = currentDateKey()
+        if (savedDate != todayKey) {
+            if (savedDate.isNotEmpty()) {
+                history = history + (savedDate to todaySteps)
+                saveHistory()
+            }
+            todaySteps = 0
+            baselineSteps = 0f
+            isBaselineSet = false
+            savedDate = todayKey
+            saveDate(todayKey)
+            saveTodaySteps()
+        }
+    }
+}
+
+@Composable
+fun StepCounterScreen(
+    todaySteps: Int,
+    goal: Int,
+    history: Map<String, Int>,
+    onGoalChange: (Int) -> Unit,
+    onSaveGoal: () -> Unit
+) {
+    val weeklyTotal = history.entries
+        .filter { it.key >= dateDaysAgo(7) }
+        .sumOf { it.value }
+    val monthlyTotal = history.entries
+        .filter { it.key >= dateDaysAgo(30) }
+        .sumOf { it.value }
+
+    var goalText by remember { mutableStateOf(goal.toString()) }
+
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        Card(modifier = Modifier.fillMaxWidth(), elevation = 8.dp) {
+            Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("Today", fontSize = 18.sp)
+                Text("$todaySteps", fontSize = 56.sp, modifier = Modifier.padding(vertical = 8.dp))
+                Text("steps", fontSize = 16.sp)
+                Text("$todaySteps / $goal steps", fontSize = 14.sp, color = MaterialTheme.colors.primary)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Card(modifier = Modifier.fillMaxWidth(), elevation = 8.dp) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("Daily Goal", fontSize = 18.sp)
+                OutlinedTextField(
+                    value = goalText,
+                    onValueChange = { goalText = it },
+                    label = { Text("Goal") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(onClick = {
+                    onGoalChange(goalText.toIntOrNull() ?: goal)
+                    onSaveGoal()
+                }) {
+                    Text("Save goal")
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Card(modifier = Modifier.fillMaxWidth(), elevation = 8.dp) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("History", fontSize = 18.sp)
+                Text("Last 7 days: $weeklyTotal steps")
+                Text("Last 30 days: $monthlyTotal steps")
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Card(modifier = Modifier.fillMaxWidth(), elevation = 8.dp) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("Recent Days", fontSize = 18.sp)
+                LazyColumn {
+                    items(history.toList().sortedByDescending { it.first }.take(7)) { record ->
+                        Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(record.first)
+                            Text("${record.second}")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fun dateDaysAgo(days: Int): String {
+    val calendar = Calendar.getInstance()
+    calendar.add(Calendar.DATE, -days + 1)
+    val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+    return fmt.format(calendar.time)
 }
